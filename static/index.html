@@ -1,1 +1,96 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>桥梁结构监测与限行决策</title><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#17212b}pre{background:#f4f7f9;padding:1rem;overflow:auto}button{padding:.55rem 1rem}</style></head><body><h1>桥梁结构监测与限行决策</h1><p>融合传感、巡检、交通荷载和天气数据，生成限载限行或恢复建议</p><p>监测偏差与预警阈值之比和多条异常记录决定告警等级；限行与封闭决策必须绑定交通通告记录。</p><button onclick="loadItems()">刷新列表</button><pre id="out">使用X-Actor和X-Role请求头调用接口。</pre><script>async function loadItems(){const r=await fetch('/api/items',{headers:{'X-Actor':'demo','X-Role':'viewer'}});document.getElementById('out').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>桥梁结构监测与限行决策</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:1080px;margin:1.5rem auto;padding:0 1rem;color:#17212b;background:#f7f9fb}
+h1{font-size:1.4rem} h2{font-size:1.1rem;margin-top:1.6rem;border-left:4px solid #2b6cb0;padding-left:.5rem}
+.panel{background:#fff;border:1px solid #dde3ea;border-radius:8px;padding:1rem;margin-bottom:1rem}
+table{border-collapse:collapse;width:100%;font-size:.85rem;background:#fff}
+th,td{border:1px solid #e2e8f0;padding:.4rem .55rem;text-align:left;vertical-align:top}
+th{background:#edf2f7}
+.ok{color:#1a7f37;font-weight:600}.bad{color:#c0392b;font-weight:600}.warn{color:#b7791f;font-weight:600}.muted{color:#718096}
+.blocker{color:#c0392b;font-size:.8rem;margin:0;padding-left:1rem}
+.controls{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.8rem}
+input,select,button{padding:.4rem .6rem;font-size:.85rem;border:1px solid #cbd5e0;border-radius:4px}
+button{background:#2b6cb0;color:#fff;cursor:pointer}button.sec{background:#4a5568}
+pre{background:#1a202c;color:#e2e8f0;padding:.8rem;overflow:auto;border-radius:6px;font-size:.78rem;max-height:340px}
+small{color:#718096}
+</style>
+</head>
+<body>
+<h1>桥梁结构监测与限行决策</h1>
+<p><small>校准、重算、查询职责分离；同一测点仅一份生效校准；缺失/过期/设备号不符/重复生效时新告警与限行封闭不得放行。</small></p>
+
+<div class="controls">
+<label>身份 <input id="actor" value="demo" size="8"></label>
+<label>角色 <select id="role">
+<option>viewer</option><option>sensor_operator</option>
+<option selected>bridge_engineer</option><option>traffic_authority</option></select></label>
+<button onclick="loadAll()">刷新查询</button>
+</div>
+
+<h2>监测告警（含生效版本与受阻原因）</h2>
+<div class="panel"><div id="items"></div></div>
+
+<h2>校准台账</h2>
+<div class="controls">
+<input id="cPoint" placeholder="测点编号 P-07" size="12">
+<input id="cDevice" placeholder="设备编号 SN-1" size="12">
+<input id="cFactor" placeholder="修正系数 1.0" size="10">
+<input id="cUntil" placeholder="有效期至 2027-01-01T00:00:00Z" size="26">
+<label><input type="checkbox" id="cReplace"> 声明替换旧生效记录</label>
+<button onclick="registerCal()">登记校准</button>
+<button class="sec" onclick="recalc()">补录后按新系数重算未结束告警</button>
+</div>
+<div class="panel"><div id="cals"></div></div>
+<pre id="out">操作结果将显示在这里。</pre>
+
+<script>
+const h=()=>({'X-Actor':document.getElementById('actor').value,'X-Role':document.getElementById('role').value,'Content-Type':'application/json'});
+function calBadge(c){
+  if(!c) return '<span class="muted">未绑定测点</span>';
+  if(c.state==='conflict') return '<span class="bad">重复生效冲突 #'+c.conflict_ids.join(', #')+'</span>';
+  if(c.state==='missing') return '<span class="bad">校准缺失</span>';
+  if(c.state==='expired') return '<span class="bad">已过期（至 '+c.valid_until+'）</span>';
+  if(c.device_mismatch) return '<span class="bad">设备号不符</span>';
+  if(c.version_stale) return '<span class="warn">版本滞后，待重算</span>';
+  return '<span class="ok">生效 #'+c.effective_calibration_id+' 系数'+c.correction_factor+'</span>';
+}
+function blockers(list){return list&&list.length?'<ul class="blocker">'+list.map(b=>'<li>'+b+'</li>').join('')+'</ul>':'<span class="ok">无</span>';}
+async function loadItems(){
+  const r=await fetch('/api/items',{headers:h()}); const d=await r.json();
+  if(!r.ok){document.getElementById('items').textContent=d.message||d.error;return;}
+  document.getElementById('items').innerHTML='<table><tr><th>ID</th><th>测点/设备</th><th>状态</th><th>原始/修正读数</th><th>生效校准版本</th><th>新告警受阻</th><th>限行封闭受阻</th></tr>'
+    +d.items.map(it=>{const c=it.calibration;return `<tr><td>${it.id}</td><td>${it.point_code||'-'}<br><small>${it.device_id||'-'}</small></td>
+      <td>${it.status}</td><td>${it.raw_quantity??'-'} → <b>${it.quantity}</b></td>
+      <td>${calBadge(c)}<br><small>有效期至 ${c.valid_until||'-'}</small></td>
+      <td>${blockers(c.blockers_create)}</td><td>${blockers(c.blockers_restriction)}</td></tr>`}).join('')+'</table>';
+}
+async function loadCals(){
+  const r=await fetch('/api/calibrations',{headers:h()}); const d=await r.json();
+  if(!r.ok){document.getElementById('cals').textContent=d.message||d.error;return;}
+  document.getElementById('cals').innerHTML='<table><tr><th>编号</th><th>测点</th><th>设备编号</th><th>校准时间</th><th>修正系数</th><th>有效期</th><th>状态</th></tr>'
+    +d.calibrations.map(c=>{
+      let badge=c.effective?'<span class="ok">生效中</span>':(c.state==='superseded'?'<span class="muted">已被替换</span>':'<span class="muted">未生效/过期</span>');
+      if(c.conflict_with) badge='<span class="bad">重复生效，冲突 #'+c.conflict_with.join(', #')+'</span>';
+      return `<tr><td>${c.id}</td><td>${c.point_code}</td><td>${c.device_id}</td><td>${c.calibrated_at}</td>
+        <td><b>${c.correction_factor}</b></td><td>${c.valid_from}<br><small>至 ${c.valid_until}</small></td><td>${badge}</td></tr>`}).join('')+'</table>';
+}
+async function registerCal(){
+  const body={point_code:cPoint.value,device_id:cDevice.value,correction_factor:Number(cFactor.value),valid_until:cUntil.value,replace:cReplace.checked};
+  const r=await fetch('/api/calibrations',{method:'POST',headers:h(),body:JSON.stringify(body)});
+  document.getElementById('out').textContent=JSON.stringify(await r.json(),null,2);loadCals();loadItems();
+}
+async function recalc(){
+  const body=cPoint.value?{point_code:cPoint.value}:{};
+  const r=await fetch('/api/calibrations/recalculate',{method:'POST',headers:h(),body:JSON.stringify(body)});
+  document.getElementById('out').textContent=JSON.stringify(await r.json(),null,2);loadCals();loadItems();
+}
+function loadAll(){loadItems();loadCals();}
+loadAll();
+</script>
+</body>
+</html>

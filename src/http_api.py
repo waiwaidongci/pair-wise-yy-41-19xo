@@ -98,6 +98,18 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"events": service.audit(role)})
+                elif path == "/api/calibrations":
+                    actor, role = self._identity()
+                    del actor
+                    query = parse_qs(urlparse(self.path).query)
+                    point_code = query.get("point_code", [None])[0]
+                    self._json(200, {"calibrations": service.list_calibrations(
+                        role, point_code)})
+                elif path.startswith("/api/calibrations/"):
+                    calibration_id = int(path.rsplit("/", 1)[-1])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.get_calibration(calibration_id, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
@@ -110,6 +122,10 @@ def make_handler(service: Service, static_dir: str):
                 body = self._body()
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
+                elif path == "/api/calibrations":
+                    self._json(201, service.register_calibration(body, actor, role))
+                elif path == "/api/calibrations/recalculate":
+                    self._json(200, service.recalibrate(body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))
