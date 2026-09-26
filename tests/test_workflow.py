@@ -6,9 +6,10 @@ from src.rules import STATES, TRANSITION_ROLES
 class WorkflowTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.repo=Repository(str(Path(self.tmp.name)/"test.db")); self.service=Service(self.repo)
+        self.service.register_calibration({"point_ref":"PT-1","device_id":"DEV-1","calibrated_at":"2026-01-01T00:00:00Z","factor":1.0,"valid_until":"2099-01-01T00:00:00Z"},"calibrator",'sensor_operator')
     def tearDown(self): self.repo.close(); self.tmp.cleanup()
     def test_complete_workflow_and_audit(self):
-        item=self.service.create_item({"title":"workflow item","description":"complete business flow","severity":'warning',"quantity":12,"threshold":6,"external_ref":"WF-1"},"creator",'sensor_operator')
+        item=self.service.create_item({"title":"workflow item","description":"complete business flow","severity":'warning',"quantity":12,"threshold":6,"external_ref":"WF-1","point_ref":"PT-1","device_id":"DEV-1"},"creator",'sensor_operator')
         self.assertEqual(item["status"],STATES[0])
         self.service.add_record(item["id"],{"kind":"evidence","detail":"evidence registered","status":"closed","external_ref":"EV-1"},"recorder",'sensor_operator')
         current=item

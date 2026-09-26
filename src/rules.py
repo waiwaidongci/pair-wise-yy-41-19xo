@@ -3,6 +3,7 @@ from .domain import ConflictError, ValidationError
 TITLE='桥梁结构监测与限行决策'; ENTITY='桥梁告警'; ID_PREFIX='BM'
 SEVERITIES=['normal', 'watch', 'warning', 'critical']; STATES=['normal', 'warning', 'restricted', 'closed', 'restored']; TRANSITIONS={'normal': ['warning'], 'warning': ['restricted'], 'restricted': ['closed'], 'closed': ['restored'], 'restored': []}; TRANSITION_ROLES={'warning': ['sensor_operator'], 'restricted': ['bridge_engineer'], 'closed': ['traffic_authority'], 'restored': ['bridge_engineer']}
 CREATE_ROLES=set(['sensor_operator']); RECORD_ROLES=set(['sensor_operator', 'bridge_engineer']); AUDIT_ROLES=set(['bridge_engineer', 'viewer']); VIEW_ROLES=set(['sensor_operator', 'bridge_engineer', 'traffic_authority', 'viewer'])
+CALIBRATION_ENTITY='校准台账'; CALIBRATION_ROLES=set(['sensor_operator', 'bridge_engineer']); GATED_TRANSITIONS=set(['restricted', 'closed'])
 SEVERITY_WEIGHT={'normal': 1.0, 'watch': 3.0, 'warning': 6.0, 'critical': 9.0}; DEADLINE_HOURS={'normal': 72, 'watch': 24, 'warning': 8, 'critical': 4}; TERMINAL_STATES=set(['restored'])
 def priority_score(severity,quantity=0.0,threshold=1.0,open_records=0):
     if severity not in SEVERITY_WEIGHT: raise ValidationError("unknown severity")
@@ -19,4 +20,10 @@ def validate_transition(current,target):
     if current not in STATES or target not in STATES: raise ValidationError("未知状态")
     if not can_transition(current,target): raise ConflictError(f"不能从{current}转换到{target}")
 def completion_blockers(target,open_records): return ["仍有未关闭事项"] if target in TERMINAL_STATES and open_records>0 else []
+def calibration_blockers(calibration,device_id,now):
+    if calibration is None: return ["校准缺失：测点无生效校准记录"]
+    blockers=[]
+    if calibration["valid_until"]<=now: blockers.append(f"校准过期：有效期至{calibration['valid_until']}")
+    if device_id is not None and calibration["device_id"]!=device_id: blockers.append(f"设备号对不上：读数设备{device_id}与校准设备{calibration['device_id']}不一致")
+    return blockers
 def role_for_transition(target): return set(TRANSITION_ROLES.get(target,[]))

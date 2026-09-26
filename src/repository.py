@@ -65,7 +65,37 @@ class Repository:
                     entry_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS calibrations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    point_ref TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    calibrated_at TEXT NOT NULL,
+                    factor REAL NOT NULL,
+                    valid_until TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active'
+                        CHECK(status IN ('active','superseded')),
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_calibrations_active
+                    ON calibrations(point_ref) WHERE status='active';
             """)
+        self._ensure_item_columns()
+
+    def _ensure_item_columns(self) -> None:
+        with self._lock, self.conn:
+            existing = {row["name"] for row in
+                        self.conn.execute("PRAGMA table_info(items)").fetchall()}
+            additions = [
+                ("point_ref", "ALTER TABLE items ADD COLUMN point_ref TEXT"),
+                ("device_id", "ALTER TABLE items ADD COLUMN device_id TEXT"),
+                ("factor", "ALTER TABLE items ADD COLUMN factor REAL NOT NULL DEFAULT 1.0"),
+                ("corrected_quantity", "ALTER TABLE items ADD COLUMN corrected_quantity REAL"),
+                ("calibration_id", "ALTER TABLE items ADD COLUMN calibration_id INTEGER"),
+            ]
+            for name, ddl in additions:
+                if name not in existing:
+                    self.conn.execute(ddl)
 
     @staticmethod
     def _item(row: sqlite3.Row) -> Dict[str, Any]:
@@ -73,16 +103,19 @@ class Repository:
 
     def create_item(self, title: str, description: str, severity: str,
                     quantity: float, threshold: float, external_ref: Optional[str],
-                    actor: str) -> Dict[str, Any]:
+                    actor: str, point_ref: str, device_id: str, factor: float,
+                    corrected_quantity: float, calibration_id: int) -> Dict[str, Any]:
         now = utc_now()
         try:
             with self._lock, self.conn:
                 cur = self.conn.execute(
                     """INSERT INTO items(title, description, severity, quantity, threshold,
-                       status, version, external_ref, created_by, created_at, updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                       status, version, external_ref, created_by, created_at, updated_at,
+                       point_ref, device_id, factor, corrected_quantity, calibration_id)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (title, description, severity, quantity, threshold, STATES[0], 1,
-                     external_ref, actor, now, now),
+                     external_ref, actor, now, now, point_ref, device_id, factor,
+                     corrected_quantity, calibration_id),
                 )
                 item_id = int(cur.lastrowid)
         except sqlite3.IntegrityError as exc:
@@ -156,6 +189,85 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return int(row["n"])
+
+    def create_calibration(self, point_ref: str, device_id: str, calibrated_at: str,
+                           factor: float, valid_until: str, replace: bool,
+                           actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        try:
+            with self._lock, self.conn:
+                existing = self.conn.execute(
+                    "SELECT * FROM calibrations WHERE point_ref=? AND status='active'",
+                    (point_ref,),
+                ).fetchone()
+                if existing is not None:
+                    if not replace:
+                        raise ConflictError(
+                            f"测点{point_ref}已存在生效校准#{existing['id']}"
+                            f"（设备{existing['device_id']}，有效期至{existing['valid_until']}），"
+                            "同一测点不允许两份生效记录；如需更换请显式指定replace=true")
+                    self.conn.execute(
+                        "UPDATE calibrations SET status='superseded' WHERE id=?",
+                        (existing["id"],),
+                    )
+                cur = self.conn.execute(
+                    """INSERT INTO calibrations(point_ref, device_id, calibrated_at, factor,
+                       valid_until, status, created_by, created_at)
+                       VALUES(?,?,?,?,?,'active',?,?)""",
+                    (point_ref, device_id, calibrated_at, factor, valid_until, actor, now),
+                )
+                calibration_id = int(cur.lastrowid)
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError(f"测点{point_ref}已存在生效校准记录，重复生效不被允许") from exc
+        return self.get_calibration(calibration_id)
+
+    def get_calibration(self, calibration_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM calibrations WHERE id=?", (calibration_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("校准记录不存在")
+        return dict(row)
+
+    def get_active_calibration(self, point_ref: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM calibrations WHERE point_ref=? AND status='active'",
+                (point_ref,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_calibrations(self, point_ref: Optional[str] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM calibrations"
+        params: tuple = ()
+        if point_ref:
+            sql += " WHERE point_ref=?"
+            params = (point_ref,)
+        sql += " ORDER BY point_ref, id DESC"
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_items_by_point(self, point_ref: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM items WHERE point_ref=? ORDER BY id", (point_ref,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_item_calibration(self, item_id: int, device_id: str, factor: float,
+                                corrected_quantity: float,
+                                calibration_id: int) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE items SET device_id=?, factor=?, corrected_quantity=?,
+                   calibration_id=?, version=version+1, updated_at=? WHERE id=?""",
+                (device_id, factor, corrected_quantity, calibration_id, now, item_id),
+            )
+            if cur.rowcount == 0:
+                raise NotFoundError("项目不存在")
+        return self.get_item(item_id)
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:
